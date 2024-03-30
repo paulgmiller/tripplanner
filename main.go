@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 
@@ -11,31 +12,49 @@ import (
 )
 
 const (
-	owner = "paulgmiller"
-	repo  = "tripplanner"
+	owner  = "paulgmiller"
+	repo   = "tripplanner"
+	branch = "master"
 )
 
 func main() {
 	githubpat := os.Getenv("GITHUB_PAT")
 	openaiat := os.Getenv("OPENAI_AT")
 
-	//prometheus.http
-	ghclient := github.NewClient(nil).WithAuthToken(githubpat)
+	tp := &tripplanner{
+		github.NewClient(nil).WithAuthToken(githubpat),
+		openai.NewClient(openaiat),
+	}
+
+	http.Handle("/", tp)
+	http.ListenAndServe("", nil)
+
+}
+
+type tripplanner struct {
+	ghclient     *github.Client
+	openaiclient *openai.Client
+}
+
+func (tp *tripplanner) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
+
 	ctx := context.Background()
-	fileContent, _, _, err := ghclient.Repositories.GetContents(ctx, owner, repo, path, &github.RepositoryContentGetOptions{Ref: "master"})
+	path := req.URL.Path
+	fileContent, _, _, err := tp.ghclient.Repositories.GetContents(ctx, owner, repo, path, &github.RepositoryContentGetOptions{Ref: branch})
 	if err != nil {
-		// handle error
+		log.Printf("can't find gh file %s", err)
+		resp.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	content, err := fileContent.GetContent()
 	if err != nil {
-		// handle error
+		log.Printf("can't getch gh file %s", err)
+		resp.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
-	http.NewServeMux().Handle("/")
-
-	openaiclient := openai.NewClient(openaiat)
-	resp, err := openaiclient.CreateChatCompletion(
+	airesp, err := tp.openaiclient.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
 			Model: openai.GPT3Dot5Turbo,
@@ -49,14 +68,25 @@ func main() {
 	)
 
 	if err != nil {
-		fmt.Printf("ChatCompletion error: %v\n", err)
+		log.Printf("ChatCompletion error: %v\n", err)
+		resp.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	fmt.Println(resp.Choices[0].Message.Content)
-}
+	fmt.Println(airesp.Choices[0].Message.Content)
 
-type tripplanner struct {
-}
+	opts := &github.RepositoryContentFileOptions{
+		Message: github.String("Update file with new content"),
+		Content: []byte(content),
+		SHA:     github.String("DEADBEEFDEADBEEF"),
+		Branch:  github.String(branch),
+	}
 
-//
+	_, _, err = tp.ghclient.Repositories.UpdateFile(ctx, owner, repo, path, opts)
+	if err != nil {
+		log.Printf("can't update gh file %s", err)
+		resp.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+}
